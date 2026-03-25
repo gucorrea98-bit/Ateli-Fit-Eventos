@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
-import { ShoppingCart, Plus, Minus, Trash2, Printer, ArrowLeft, Utensils, Coffee, Pizza, RefreshCcw, ClipboardList, CheckCircle2, Clock } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, Trash2, Printer, ArrowLeft, Utensils, Coffee, Pizza, RefreshCcw, ClipboardList, CheckCircle2, Clock, Settings } from 'lucide-react';
 import { saveOrderToSupabase, updateOrderStatusInSupabase, fetchOrdersFromSupabase } from './services/orderService';
+import * as qz from 'qz-tray';
 
 type ItemType = 'marmita' | 'salgado' | 'bebida';
 
@@ -27,7 +28,7 @@ interface Order {
   createdAt: Date;
 }
 
-type ViewState = 'HOME' | 'MARMITA' | 'SALGADO' | 'BEBIDA' | 'CHECKOUT' | 'ORDERS';
+type ViewState = 'HOME' | 'MARMITA' | 'SALGADO' | 'BEBIDA' | 'CHECKOUT' | 'ORDERS' | 'SETTINGS';
 
 const MARMITA_SIZES = [
   { id: '300g', label: '300g', price: 25.90 },
@@ -66,6 +67,54 @@ export default function App() {
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [orders, setOrders] = useState<Order[]>([]);
   const [reprintOrder, setReprintOrder] = useState<Order | null>(null);
+
+  // Printer State
+  const [printers, setPrinters] = useState<string[]>([]);
+  const [selectedPrinter, setSelectedPrinter] = useState<string>('');
+  const [qzConnected, setQzConnected] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+
+  // Initialize QZ Tray
+  useEffect(() => {
+    const initQZ = async () => {
+      try {
+        if (!qz.websocket.isActive()) {
+          await qz.websocket.connect();
+          setQzConnected(true);
+          
+          // Get list of printers
+          const foundPrinters = await qz.printers.find();
+          setPrinters(foundPrinters);
+          
+          // Try to find a default thermal printer
+          const defaultPrinter = foundPrinters.find(p => 
+            p.toLowerCase().includes('thermal') || 
+            p.toLowerCase().includes('58') || 
+            p.toLowerCase().includes('80') ||
+            p.toLowerCase().includes('pos') ||
+            p.toLowerCase().includes('receipt')
+          );
+          
+          if (defaultPrinter) {
+            setSelectedPrinter(defaultPrinter);
+          } else if (foundPrinters.length > 0) {
+            setSelectedPrinter(foundPrinters[0]);
+          }
+        }
+      } catch (err) {
+        console.error("QZ Tray connection error:", err);
+        setQzConnected(false);
+      }
+    };
+
+    initQZ();
+
+    return () => {
+      if (qz.websocket.isActive()) {
+        qz.websocket.disconnect();
+      }
+    };
+  }, []);
 
   // Marmita State
   const [mSize, setMSize] = useState<string | null>(null);
@@ -182,6 +231,114 @@ export default function App() {
     resetBebidas();
   };
 
+  const generateReceiptText = (orderData: Order | { customerName: string, items: CartItem[], subtotal: number, discountPercent: number, discountAmount: number, total: number, createdAt: Date, id?: string }, isReprint = false) => {
+    const dateStr = orderData.createdAt.toLocaleDateString();
+    const timeStr = orderData.createdAt.toLocaleTimeString();
+    
+    // 58mm is roughly 32 characters wide
+    const line = '-'.repeat(32) + '\n';
+    
+    let text = '\x1B\x40'; // Initialize printer (ESC @)
+    text += '\x1B\x61\x01'; // Center alignment
+    text += '\x1B\x45\x01'; // Bold ON
+    text += 'ATELIE FIT EVENTOS\n';
+    text += '\x1B\x45\x00'; // Bold OFF
+    text += '\x1B\x61\x00'; // Left alignment
+    
+    text += line;
+    text += `Data: ${dateStr} ${timeStr}\n`;
+    if (isReprint) {
+      text += '\x1B\x45\x01* REIMPRESSAO *\x1B\x45\x00\n';
+    }
+    if (orderData.id) {
+      text += `Pedido: #${orderData.id.slice(-4)}\n`;
+    }
+    text += line;
+    
+    if (orderData.customerName) {
+      text += `Cliente: ${orderData.customerName}\n`;
+      text += line;
+    }
+
+    // Items
+    orderData.items.forEach(item => {
+      const qtyName = `${item.quantity}x ${item.name}`;
+      const price = formatPrice(item.price * item.quantity);
+      
+      // Calculate spacing to right-align price
+      const spacesNeeded = Math.max(1, 32 - qtyName.length - price.length);
+      text += `${qtyName}${' '.repeat(spacesNeeded)}${price}\n`;
+      
+      if (item.description) {
+        // Indent description and truncate if too long
+        const desc = `  ${item.description}`.substring(0, 32);
+        text += `${desc}\n`;
+      }
+    });
+    
+    text += line;
+    
+    // Totals
+    const subtotalStr = formatPrice(orderData.subtotal);
+    text += `Subtotal${' '.repeat(32 - 8 - subtotalStr.length)}${subtotalStr}\n`;
+    
+    if (orderData.discountPercent > 0) {
+      const discLabel = `Desc (${orderData.discountPercent}%)`;
+      const discVal = `- ${formatPrice(orderData.discountAmount)}`;
+      text += `${discLabel}${' '.repeat(32 - discLabel.length - discVal.length)}${discVal}\n`;
+    }
+    
+    text += '\x1B\x45\x01'; // Bold ON
+    const totalStr = formatPrice(orderData.total);
+    text += `TOTAL${' '.repeat(32 - 5 - totalStr.length)}${totalStr}\n`;
+    text += '\x1B\x45\x00'; // Bold OFF
+    
+    text += line;
+    text += '\x1B\x61\x01'; // Center alignment
+    text += 'Obrigado pela preferencia!\n';
+    
+    // Feed paper and cut
+    text += '\n\n\n\n\n';
+    text += '\x1D\x56\x41\x10'; // Partial cut (GS V)
+    
+    return text;
+  };
+
+  const printWithQZ = async (orderData: any, isReprint = false) => {
+    if (!qzConnected || !selectedPrinter) {
+      // Fallback to browser print
+      if (isReprint) {
+        setReprintOrder(orderData);
+        setTimeout(() => {
+          window.print();
+          setTimeout(() => setReprintOrder(null), 500);
+        }, 100);
+      } else {
+        window.print();
+      }
+      return;
+    }
+
+    setIsPrinting(true);
+    try {
+      const config = qz.configs.create(selectedPrinter);
+      const data = [
+        {
+          type: 'raw',
+          format: 'command',
+          flavor: 'plain',
+          data: generateReceiptText(orderData, isReprint)
+        }
+      ];
+      await qz.print(config, data);
+    } catch (err) {
+      console.error("Print error:", err);
+      alert("Erro ao imprimir. Verifique se o QZ Tray está rodando.");
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
   const handlePrint = async () => {
     const newOrder: Order = {
       id: Date.now().toString(),
@@ -199,16 +356,12 @@ export default function App() {
     // Save to Supabase
     await saveOrderToSupabase(newOrder);
 
-    window.print();
+    await printWithQZ(newOrder);
     resetOrder();
   };
 
-  const handleReprint = (order: Order) => {
-    setReprintOrder(order);
-    setTimeout(() => {
-      window.print();
-      setTimeout(() => setReprintOrder(null), 500);
-    }, 100);
+  const handleReprint = async (order: Order) => {
+    await printWithQZ(order, true);
   };
 
   const toggleOrderStatus = async (id: string) => {
@@ -303,6 +456,13 @@ export default function App() {
             >
               <ClipboardList className="w-4 h-4" /> 
               <span className="hidden sm:inline">Pedidos ({orders.filter(o => o.status === 'PENDENTE').length})</span>
+            </button>
+            <button 
+              onClick={() => setView('SETTINGS')}
+              className={`flex items-center gap-2 font-medium px-3 py-1.5 rounded-md transition-colors ${view === 'SETTINGS' ? 'bg-emerald-800 text-white' : 'text-emerald-400 hover:text-emerald-200 hover:bg-emerald-800/50'}`}
+            >
+              <Settings className="w-4 h-4" /> 
+              <span className="hidden sm:inline">Impressora</span>
             </button>
             <button 
               onClick={resetOrder}
@@ -564,10 +724,11 @@ export default function App() {
 
                 <button
                   onClick={handlePrint}
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-bold text-xl py-4 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
+                  disabled={isPrinting}
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800 disabled:text-emerald-600 text-emerald-950 font-bold text-xl py-4 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
                 >
                   <Printer className="w-6 h-6" />
-                  Imprimir Pedido
+                  {isPrinting ? 'Imprimindo...' : 'Imprimir Pedido'}
                 </button>
               </div>
             </div>
@@ -624,7 +785,8 @@ export default function App() {
                       <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
                         <button
                           onClick={() => handleReprint(order)}
-                          className="px-4 py-3 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 bg-emerald-800 hover:bg-emerald-700 text-emerald-200"
+                          disabled={isPrinting}
+                          className="px-4 py-3 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-emerald-200"
                         >
                           <Printer className="w-5 h-5" /> Reimprimir
                         </button>
@@ -651,6 +813,56 @@ export default function App() {
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* SETTINGS VIEW */}
+          {view === 'SETTINGS' && (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 max-w-xl mx-auto">
+              <div className="bg-emerald-900 rounded-2xl p-6 border border-emerald-800 shadow-xl">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
+                  <Settings className="w-6 h-6 text-emerald-400" />
+                  Configuração de Impressão Direta
+                </h2>
+                
+                <div className="space-y-6">
+                  <div className="bg-emerald-950/50 p-4 rounded-xl border border-emerald-800/50">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-bold text-emerald-100">Status do QZ Tray</h3>
+                      <div className={`px-3 py-1 rounded-full text-xs font-bold ${qzConnected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                        {qzConnected ? 'Conectado' : 'Desconectado'}
+                      </div>
+                    </div>
+                    <p className="text-sm text-emerald-300/80 leading-relaxed">
+                      Para impressão direta (como o iFood), você precisa ter o <strong>QZ Tray</strong> instalado e rodando no seu computador.
+                      {!qzConnected && (
+                        <a href="https://qz.io/download/" target="_blank" rel="noreferrer" className="block mt-2 text-emerald-400 hover:text-emerald-300 underline">
+                          Baixar QZ Tray
+                        </a>
+                      )}
+                    </p>
+                  </div>
+
+                  {qzConnected && (
+                    <div className="space-y-3">
+                      <label className="block text-sm font-medium text-emerald-300">Selecione a Impressora Térmica (58mm)</label>
+                      <select 
+                        value={selectedPrinter}
+                        onChange={(e) => setSelectedPrinter(e.target.value)}
+                        className="w-full bg-emerald-950 border border-emerald-700 rounded-lg p-3 text-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      >
+                        <option value="">Selecione uma impressora...</option>
+                        {printers.map(p => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-emerald-400/80">
+                        O sistema enviará os comandos de impressão diretamente para esta impressora, sem abrir telas de confirmação.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
