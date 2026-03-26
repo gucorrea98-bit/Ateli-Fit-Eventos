@@ -31,7 +31,7 @@ export const saveOrderToSupabase = async (order: OrderData) => {
           discount_amount: order.discountAmount,
           total: order.total,
           status: order.status,
-          created_at: order.createdAt.toISOString(),
+          created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : new Date(order.createdAt).toISOString(),
         }
       ]);
 
@@ -57,7 +57,7 @@ export const fetchOrdersFromSupabase = async () => {
     return data.map((row: any) => ({
       id: row.id,
       customerName: row.customer_name,
-      items: row.items,
+      items: typeof row.items === 'string' ? JSON.parse(row.items) : (row.items || []),
       subtotal: row.subtotal || row.total,
       discountPercent: row.discount_percent || 0,
       discountAmount: row.discount_amount || 0,

@@ -1,7 +1,9 @@
 import { useState, useMemo, useEffect } from 'react';
 import { ShoppingCart, Plus, Minus, Trash2, Printer, ArrowLeft, Utensils, Coffee, Pizza, RefreshCcw, ClipboardList, CheckCircle2, Clock, Settings } from 'lucide-react';
 import { saveOrderToSupabase, updateOrderStatusInSupabase, fetchOrdersFromSupabase } from './services/orderService';
-import * as qz from 'qz-tray';
+import qz from 'qz-tray';
+
+const qzInstance = qz && (qz as any).default ? (qz as any).default : qz;
 
 type ItemType = 'marmita' | 'salgado' | 'bebida';
 
@@ -60,6 +62,8 @@ const BEBIDAS = [
   { id: 'agua_gas', label: 'Água com gás', price: 6.00 },
 ];
 
+let qzConnectionPromise: Promise<void> | null = null;
+
 export default function App() {
   const [view, setView] = useState<ViewState>('HOME');
   const [customerName, setCustomerName] = useState('');
@@ -78,12 +82,17 @@ export default function App() {
   useEffect(() => {
     const initQZ = async () => {
       try {
-        if (!qz.websocket.isActive()) {
-          await qz.websocket.connect();
+        if (qzInstance && qzInstance.websocket) {
+          if (!qzInstance.websocket.isActive()) {
+            if (!qzConnectionPromise) {
+              qzConnectionPromise = qzInstance.websocket.connect();
+            }
+            await qzConnectionPromise;
+          }
           setQzConnected(true);
           
           // Get list of printers
-          const foundPrinters = await qz.printers.find();
+          const foundPrinters = await qzInstance.printers.find();
           setPrinters(foundPrinters);
           
           // Try to find a default thermal printer
@@ -101,19 +110,20 @@ export default function App() {
             setSelectedPrinter(foundPrinters[0]);
           }
         }
-      } catch (err) {
-        console.error("QZ Tray connection error:", err);
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        if (!errMsg.includes('cancelled by user') && !errMsg.includes('Waiting for previous disconnect')) {
+          console.error("QZ Tray connection error:", err);
+        }
         setQzConnected(false);
+        qzConnectionPromise = null;
       }
     };
 
     initQZ();
 
-    return () => {
-      if (qz.websocket.isActive()) {
-        qz.websocket.disconnect();
-      }
-    };
+    // Do not disconnect on unmount to avoid StrictMode issues
+    // where component unmounts and remounts immediately
   }, []);
 
   // Marmita State
@@ -232,8 +242,9 @@ export default function App() {
   };
 
   const generateReceiptText = (orderData: Order | { customerName: string, items: CartItem[], subtotal: number, discountPercent: number, discountAmount: number, total: number, createdAt: Date, id?: string }, isReprint = false) => {
-    const dateStr = orderData.createdAt.toLocaleDateString();
-    const timeStr = orderData.createdAt.toLocaleTimeString();
+    const dateObj = new Date(orderData.createdAt);
+    const dateStr = dateObj.toLocaleDateString();
+    const timeStr = dateObj.toLocaleTimeString();
     
     // 58mm is roughly 32 characters wide
     const line = '-'.repeat(32) + '\n';
@@ -261,7 +272,7 @@ export default function App() {
     }
 
     // Items
-    orderData.items.forEach(item => {
+    (orderData.items || []).forEach(item => {
       const qtyName = `${item.quantity}x ${item.name}`;
       const price = formatPrice(item.price * item.quantity);
       
@@ -305,23 +316,19 @@ export default function App() {
   };
 
   const printWithQZ = async (orderData: any, isReprint = false) => {
-    if (!qzConnected || !selectedPrinter) {
+    if (!qzConnected || !selectedPrinter || !qzInstance?.websocket?.isActive()) {
       // Fallback to browser print
-      if (isReprint) {
-        setReprintOrder(orderData);
-        setTimeout(() => {
-          window.print();
-          setTimeout(() => setReprintOrder(null), 500);
-        }, 100);
-      } else {
+      setReprintOrder(orderData);
+      setTimeout(() => {
         window.print();
-      }
+        setTimeout(() => setReprintOrder(null), 500);
+      }, 100);
       return;
     }
 
     setIsPrinting(true);
     try {
-      const config = qz.configs.create(selectedPrinter);
+      const config = qzInstance.configs.create(selectedPrinter);
       const data = [
         {
           type: 'raw',
@@ -330,7 +337,7 @@ export default function App() {
           data: generateReceiptText(orderData, isReprint)
         }
       ];
-      await qz.print(config, data);
+      await qzInstance.print(config, data);
     } catch (err) {
       console.error("Print error:", err);
       alert("Erro ao imprimir. Verifique se o QZ Tray está rodando.");
@@ -375,7 +382,7 @@ export default function App() {
     await updateOrderStatusInSupabase(id, newStatus);
   };
 
-  const formatPrice = (value: number) => `R$ ${value.toFixed(2).replace('.', ',')}`;
+  const formatPrice = (value: number) => `R$ ${(value || 0).toFixed(2).replace('.', ',')}`;
 
   return (
     <div className="min-h-screen bg-emerald-950 text-emerald-50 font-sans flex flex-col md:flex-row overflow-hidden">
@@ -706,7 +713,7 @@ export default function App() {
                         min="0" 
                         max="100" 
                         value={discountPercent || ''}
-                        onChange={(e) => setDiscountPercent(Number(e.target.value))}
+                        onChange={(e) => setDiscountPercent(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
                         className="w-20 bg-emerald-950 border border-emerald-700 rounded-md p-1.5 text-right text-emerald-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                         placeholder="0"
                       />
@@ -775,10 +782,10 @@ export default function App() {
                           </span>
                         </div>
                         <div className="text-xs text-emerald-400 mb-2">
-                          {order.createdAt.toLocaleTimeString()} • {order.items.reduce((acc, i) => acc + i.quantity, 0)} itens • {formatPrice(order.total)}
+                          {new Date(order.createdAt).toLocaleTimeString()} • {(order.items || []).reduce((acc, i) => acc + i.quantity, 0)} itens • {formatPrice(order.total)}
                         </div>
                         <div className="text-sm text-emerald-100/80 leading-tight">
-                          {order.items.map(i => `${i.quantity}x ${i.name}`).join(', ')}
+                          {(order.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ')}
                         </div>
                       </div>
                       
@@ -875,7 +882,7 @@ export default function App() {
           ATELIÊ FIT EVENTOS
         </div>
         <div style={{ borderBottom: '1px dashed black', paddingBottom: '4px', marginBottom: '4px', fontSize: '9px' }}>
-          Data: {reprintOrder ? reprintOrder.createdAt.toLocaleDateString() : new Date().toLocaleDateString()} {reprintOrder ? reprintOrder.createdAt.toLocaleTimeString() : new Date().toLocaleTimeString()}
+          Data: {reprintOrder ? new Date(reprintOrder.createdAt).toLocaleDateString() : new Date().toLocaleDateString()} {reprintOrder ? new Date(reprintOrder.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
           {reprintOrder && <div style={{ fontWeight: 'bold', marginTop: '2px' }}>* REIMPRESSÃO *</div>}
         </div>
         
@@ -886,7 +893,7 @@ export default function App() {
         )}
 
         <div style={{ marginBottom: '6px' }}>
-          {(reprintOrder ? reprintOrder.items : cart).map(item => (
+          {(reprintOrder ? (reprintOrder.items || []) : cart).map(item => (
             <div key={item.id} style={{ marginBottom: '4px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '10px' }}>
                 <span style={{ flex: 1, paddingRight: '4px' }}>{item.quantity}x {item.name}</span>
