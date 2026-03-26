@@ -83,36 +83,49 @@ export default function App() {
     const initQZ = async () => {
       try {
         if (qzInstance && qzInstance.websocket) {
-          if (!qzInstance.websocket.isActive()) {
-            if (!qzConnectionPromise) {
-              qzConnectionPromise = qzInstance.websocket.connect();
-            }
+          if (!qzInstance.websocket.isActive() && !qzConnectionPromise) {
+            qzConnectionPromise = qzInstance.websocket.connect().finally(() => {
+              qzConnectionPromise = null;
+            });
+          }
+          
+          if (qzConnectionPromise) {
             await qzConnectionPromise;
           }
-          setQzConnected(true);
           
-          // Get list of printers
-          const foundPrinters = await qzInstance.printers.find();
-          setPrinters(foundPrinters);
-          
-          // Try to find a default thermal printer
-          const defaultPrinter = foundPrinters.find(p => 
-            p.toLowerCase().includes('thermal') || 
-            p.toLowerCase().includes('58') || 
-            p.toLowerCase().includes('80') ||
-            p.toLowerCase().includes('pos') ||
-            p.toLowerCase().includes('receipt')
-          );
-          
-          if (defaultPrinter) {
-            setSelectedPrinter(defaultPrinter);
-          } else if (foundPrinters.length > 0) {
-            setSelectedPrinter(foundPrinters[0]);
+          // Double check if it's active and OPEN after the promise resolves
+          if (qzInstance.websocket.isActive() && qzInstance.websocket.connection?.readyState === 1) {
+            setQzConnected(true);
+            
+            // Get list of printers
+            const foundPrinters = await qzInstance.printers.find();
+            setPrinters(foundPrinters);
+            
+            // Try to find a default thermal printer
+            const defaultPrinter = foundPrinters.find(p => 
+              p.toLowerCase().includes('thermal') || 
+              p.toLowerCase().includes('58') || 
+              p.toLowerCase().includes('80') ||
+              p.toLowerCase().includes('pos') ||
+              p.toLowerCase().includes('receipt')
+            );
+            
+            if (defaultPrinter) {
+              setSelectedPrinter(defaultPrinter);
+            } else if (foundPrinters.length > 0) {
+              setSelectedPrinter(foundPrinters[0]);
+            }
+          } else {
+            setQzConnected(false);
           }
         }
       } catch (err: any) {
         const errMsg = err?.message || String(err);
-        if (!errMsg.includes('cancelled by user') && !errMsg.includes('Waiting for previous disconnect')) {
+        if (
+          !errMsg.includes('cancelled by user') && 
+          !errMsg.includes('Waiting for previous disconnect') &&
+          !errMsg.includes('Unable to establish connection')
+        ) {
           console.error("QZ Tray connection error:", err);
         }
         setQzConnected(false);
@@ -316,7 +329,7 @@ export default function App() {
   };
 
   const printWithQZ = async (orderData: any, isReprint = false) => {
-    if (!qzConnected || !selectedPrinter || !qzInstance?.websocket?.isActive()) {
+    if (!qzConnected || !selectedPrinter || !qzInstance?.websocket?.isActive() || qzInstance.websocket.connection?.readyState !== 1) {
       // Fallback to browser print
       setReprintOrder(orderData);
       setTimeout(() => {

@@ -4,52 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ateliê Fit Eventos</title>
-    <script>
-      // Workaround for environments where window.fetch is on the prototype chain
-      // with only a getter, causing polyfills to throw when assigning to it.
-      try {
-        ['fetch', 'Headers', 'Request', 'Response'].forEach(prop => {
-          // Check Window.prototype
-          if (typeof Window !== 'undefined' && Window.prototype) {
-            const desc = Object.getOwnPropertyDescriptor(Window.prototype, prop);
-            if (desc && desc.get && !desc.set && desc.configurable) {
-              Object.defineProperty(Window.prototype, prop, {
-                get: desc.get,
-                set: function(val) {
-                  Object.defineProperty(this, prop, {
-                    value: val,
-                    writable: true,
-                    configurable: true,
-                    enumerable: true
-                  });
-                },
-                configurable: true,
-                enumerable: desc.enumerable
-              });
-            }
-          }
-          // Also check globalThis directly just in case it's an own property
-          const globalDesc = Object.getOwnPropertyDescriptor(globalThis, prop);
-          if (globalDesc && globalDesc.get && !globalDesc.set && globalDesc.configurable) {
-            Object.defineProperty(globalThis, prop, {
-              get: globalDesc.get,
-              set: function(val) {
-                Object.defineProperty(this, prop, {
-                  value: val,
-                  writable: true,
-                  configurable: true,
-                  enumerable: true
-                });
-              },
-              configurable: true,
-              enumerable: globalDesc.enumerable
-            });
-          }
-        });
-      } catch (e) {
-        console.error('Failed to patch globals:', e);
-      }
-    </script>
   </head>
   <body>
     <div id="root"></div>
