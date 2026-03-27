@@ -98,6 +98,15 @@ export default function App() {
   const discountAmount = useMemo(() => subtotal * (discountPercent / 100), [subtotal, discountPercent]);
   const total = useMemo(() => subtotal - discountAmount, [subtotal, discountAmount]);
 
+  const sortedOrders = useMemo(() => {
+    return [...orders].sort((a, b) => {
+      if (a.status === b.status) {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      }
+      return a.status === 'PENDENTE' ? -1 : 1;
+    });
+  }, [orders]);
+
   const resetMarmita = () => {
     setMSize(null);
     setMBase(null);
@@ -591,7 +600,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {orders.map(order => (
+                  {sortedOrders.map(order => (
                     <div 
                       key={order.id} 
                       className={`bg-emerald-900 border-l-4 rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 transition-all ${
