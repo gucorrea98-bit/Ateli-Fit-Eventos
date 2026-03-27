@@ -1,5 +1,3 @@
-import { supabase } from '../lib/supabase';
-
 export interface OrderData {
   id: string;
   customerName: string;
@@ -9,81 +7,52 @@ export interface OrderData {
   discountAmount?: number;
   total: number;
   status: string;
-  createdAt: Date;
+  createdAt: Date | string;
 }
 
-export const saveOrderToSupabase = async (order: OrderData) => {
-  if (!supabase) {
-    console.warn('Supabase is not configured. Order saved locally only.');
-    return null;
-  }
+const STORAGE_KEY = 'atelie_fit_orders';
 
+const getLocalOrders = (): OrderData[] => {
+  const data = localStorage.getItem(STORAGE_KEY);
+  if (!data) return [];
   try {
-    const { data, error } = await supabase
-      .from('orders')
-      .insert([
-        {
-          id: order.id,
-          customer_name: order.customerName,
-          items: order.items,
-          subtotal: order.subtotal,
-          discount_percent: order.discountPercent,
-          discount_amount: order.discountAmount,
-          total: order.total,
-          status: order.status,
-          created_at: order.createdAt instanceof Date ? order.createdAt.toISOString() : new Date(order.createdAt).toISOString(),
-        }
-      ]);
-
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    console.error('Error saving order to Supabase:', error);
-    return null;
-  }
-};
-
-export const fetchOrdersFromSupabase = async () => {
-  if (!supabase) return [];
-
-  try {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    
-    return data.map((row: any) => ({
-      id: row.id,
-      customerName: row.customer_name,
-      items: typeof row.items === 'string' ? JSON.parse(row.items) : (row.items || []),
-      subtotal: row.subtotal || row.total,
-      discountPercent: row.discount_percent || 0,
-      discountAmount: row.discount_amount || 0,
-      total: row.total,
-      status: row.status,
-      createdAt: new Date(row.created_at),
-    }));
-  } catch (error) {
-    console.error('Error fetching orders from Supabase:', error);
+    return JSON.parse(data);
+  } catch (e) {
     return [];
   }
 };
 
+const saveLocalOrders = (orders: OrderData[]) => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(orders));
+};
+
+export const saveOrderToSupabase = async (order: OrderData) => {
+  const orders = getLocalOrders();
+  // Ensure date is stringified properly for storage
+  const newOrder = {
+    ...order,
+    createdAt: order.createdAt instanceof Date ? order.createdAt.toISOString() : order.createdAt
+  };
+  orders.unshift(newOrder);
+  saveLocalOrders(orders);
+  return newOrder;
+};
+
+export const fetchOrdersFromSupabase = async () => {
+  const orders = getLocalOrders();
+  return orders.map(o => ({
+    ...o,
+    createdAt: new Date(o.createdAt)
+  }));
+};
+
 export const updateOrderStatusInSupabase = async (id: string, status: string) => {
-  if (!supabase) return null;
-
-  try {
-    const { data, error } = await supabase
-      .from('orders')
-      .update({ status })
-      .eq('id', id);
-
-    if (error) throw error;
-    return data;
-  } catch (error) {
-    console.error('Error updating order status in Supabase:', error);
-    return null;
+  const orders = getLocalOrders();
+  const orderIndex = orders.findIndex(o => o.id === id);
+  if (orderIndex > -1) {
+    orders[orderIndex].status = status;
+    saveLocalOrders(orders);
+    return orders[orderIndex];
   }
+  return null;
 };

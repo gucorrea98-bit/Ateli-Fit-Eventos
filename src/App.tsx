@@ -1,9 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
-import { ShoppingCart, Plus, Minus, Trash2, Printer, ArrowLeft, Utensils, Coffee, Pizza, RefreshCcw, ClipboardList, CheckCircle2, Clock, Settings } from 'lucide-react';
+import { ShoppingCart, Plus, Minus, Trash2, ArrowLeft, Utensils, Coffee, Pizza, RefreshCcw, ClipboardList, CheckCircle2, Clock } from 'lucide-react';
 import { saveOrderToSupabase, updateOrderStatusInSupabase, fetchOrdersFromSupabase } from './services/orderService';
-import qz from 'qz-tray';
-
-const qzInstance = qz && (qz as any).default ? (qz as any).default : qz;
 
 type ItemType = 'marmita' | 'salgado' | 'bebida';
 
@@ -30,7 +27,7 @@ interface Order {
   createdAt: Date;
 }
 
-type ViewState = 'HOME' | 'MARMITA' | 'SALGADO' | 'BEBIDA' | 'CHECKOUT' | 'ORDERS' | 'SETTINGS';
+type ViewState = 'HOME' | 'MARMITA' | 'SALGADO' | 'BEBIDA' | 'CHECKOUT' | 'ORDERS';
 
 const MARMITA_SIZES = [
   { id: '300g', label: '300g', price: 25.90 },
@@ -55,14 +52,13 @@ const SALGADOS = [
 ];
 
 const BEBIDAS = [
-  { id: 'isotonico', label: 'Isotônico', price: 8.00 },
-  { id: 'coca_zero', label: 'Coca Cola Zero', price: 6.00 },
-  { id: 'coca_cola', label: 'Coca Cola', price: 6.00 },
   { id: 'agua', label: 'Água', price: 5.00 },
   { id: 'agua_gas', label: 'Água com gás', price: 6.00 },
+  { id: 'coca_cola', label: 'Coca Cola', price: 8.00 },
+  { id: 'coca_zero', label: 'Coca Cola Zero', price: 8.00 },
+  { id: 'guarana', label: 'Guaraná', price: 8.00 },
+  { id: 'isotonico', label: 'Isotônico', price: 12.00 },
 ];
-
-let qzConnectionPromise: Promise<void> | null = null;
 
 export default function App() {
   const [view, setView] = useState<ViewState>('HOME');
@@ -70,74 +66,6 @@ export default function App() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [reprintOrder, setReprintOrder] = useState<Order | null>(null);
-
-  // Printer State
-  const [printers, setPrinters] = useState<string[]>([]);
-  const [selectedPrinter, setSelectedPrinter] = useState<string>('');
-  const [qzConnected, setQzConnected] = useState(false);
-  const [isPrinting, setIsPrinting] = useState(false);
-
-  // Initialize QZ Tray
-  useEffect(() => {
-    const initQZ = async () => {
-      try {
-        if (qzInstance && qzInstance.websocket) {
-          if (!qzInstance.websocket.isActive() && !qzConnectionPromise) {
-            qzConnectionPromise = qzInstance.websocket.connect().finally(() => {
-              qzConnectionPromise = null;
-            });
-          }
-          
-          if (qzConnectionPromise) {
-            await qzConnectionPromise;
-          }
-          
-          // Double check if it's active and OPEN after the promise resolves
-          if (qzInstance.websocket.isActive() && qzInstance.websocket.connection?.readyState === 1) {
-            setQzConnected(true);
-            
-            // Get list of printers
-            const foundPrinters = await qzInstance.printers.find();
-            setPrinters(foundPrinters);
-            
-            // Try to find a default thermal printer
-            const defaultPrinter = foundPrinters.find(p => 
-              p.toLowerCase().includes('thermal') || 
-              p.toLowerCase().includes('58') || 
-              p.toLowerCase().includes('80') ||
-              p.toLowerCase().includes('pos') ||
-              p.toLowerCase().includes('receipt')
-            );
-            
-            if (defaultPrinter) {
-              setSelectedPrinter(defaultPrinter);
-            } else if (foundPrinters.length > 0) {
-              setSelectedPrinter(foundPrinters[0]);
-            }
-          } else {
-            setQzConnected(false);
-          }
-        }
-      } catch (err: any) {
-        const errMsg = err?.message || String(err);
-        if (
-          !errMsg.includes('cancelled by user') && 
-          !errMsg.includes('Waiting for previous disconnect') &&
-          !errMsg.includes('Unable to establish connection')
-        ) {
-          console.error("QZ Tray connection error:", err);
-        }
-        setQzConnected(false);
-        qzConnectionPromise = null;
-      }
-    };
-
-    initQZ();
-
-    // Do not disconnect on unmount to avoid StrictMode issues
-    // where component unmounts and remounts immediately
-  }, []);
 
   // Marmita State
   const [mSize, setMSize] = useState<string | null>(null);
@@ -153,11 +81,17 @@ export default function App() {
   useEffect(() => {
     const loadOrders = async () => {
       const fetchedOrders = await fetchOrdersFromSupabase();
-      if (fetchedOrders.length > 0) {
-        setOrders(fetchedOrders);
-      }
+      setOrders(fetchedOrders);
     };
+    
+    // Carrega os pedidos inicialmente
     loadOrders();
+
+    // Configura a atualização automática a cada 10 segundos
+    const intervalId = setInterval(loadOrders, 10000);
+
+    // Limpa o intervalo quando o componente for desmontado
+    return () => clearInterval(intervalId);
   }, []);
 
   const subtotal = useMemo(() => cart.reduce((acc, item) => acc + (item.price * item.quantity), 0), [cart]);
@@ -254,112 +188,7 @@ export default function App() {
     resetBebidas();
   };
 
-  const generateReceiptText = (orderData: Order | { customerName: string, items: CartItem[], subtotal: number, discountPercent: number, discountAmount: number, total: number, createdAt: Date, id?: string }, isReprint = false) => {
-    const dateObj = new Date(orderData.createdAt);
-    const dateStr = dateObj.toLocaleDateString();
-    const timeStr = dateObj.toLocaleTimeString();
-    
-    // 58mm is roughly 32 characters wide
-    const line = '-'.repeat(32) + '\n';
-    
-    let text = '\x1B\x40'; // Initialize printer (ESC @)
-    text += '\x1B\x61\x01'; // Center alignment
-    text += '\x1B\x45\x01'; // Bold ON
-    text += 'ATELIE FIT EVENTOS\n';
-    text += '\x1B\x45\x00'; // Bold OFF
-    text += '\x1B\x61\x00'; // Left alignment
-    
-    text += line;
-    text += `Data: ${dateStr} ${timeStr}\n`;
-    if (isReprint) {
-      text += '\x1B\x45\x01* REIMPRESSAO *\x1B\x45\x00\n';
-    }
-    if (orderData.id) {
-      text += `Pedido: #${orderData.id.slice(-4)}\n`;
-    }
-    text += line;
-    
-    if (orderData.customerName) {
-      text += `Cliente: ${orderData.customerName}\n`;
-      text += line;
-    }
-
-    // Items
-    (orderData.items || []).forEach(item => {
-      const qtyName = `${item.quantity}x ${item.name}`;
-      const price = formatPrice(item.price * item.quantity);
-      
-      // Calculate spacing to right-align price
-      const spacesNeeded = Math.max(1, 32 - qtyName.length - price.length);
-      text += `${qtyName}${' '.repeat(spacesNeeded)}${price}\n`;
-      
-      if (item.description) {
-        // Indent description and truncate if too long
-        const desc = `  ${item.description}`.substring(0, 32);
-        text += `${desc}\n`;
-      }
-    });
-    
-    text += line;
-    
-    // Totals
-    const subtotalStr = formatPrice(orderData.subtotal);
-    text += `Subtotal${' '.repeat(32 - 8 - subtotalStr.length)}${subtotalStr}\n`;
-    
-    if (orderData.discountPercent > 0) {
-      const discLabel = `Desc (${orderData.discountPercent}%)`;
-      const discVal = `- ${formatPrice(orderData.discountAmount)}`;
-      text += `${discLabel}${' '.repeat(32 - discLabel.length - discVal.length)}${discVal}\n`;
-    }
-    
-    text += '\x1B\x45\x01'; // Bold ON
-    const totalStr = formatPrice(orderData.total);
-    text += `TOTAL${' '.repeat(32 - 5 - totalStr.length)}${totalStr}\n`;
-    text += '\x1B\x45\x00'; // Bold OFF
-    
-    text += line;
-    text += '\x1B\x61\x01'; // Center alignment
-    text += 'Obrigado pela preferencia!\n';
-    
-    // Feed paper and cut
-    text += '\n\n\n\n\n';
-    text += '\x1D\x56\x41\x10'; // Partial cut (GS V)
-    
-    return text;
-  };
-
-  const printWithQZ = async (orderData: any, isReprint = false) => {
-    if (!qzConnected || !selectedPrinter || !qzInstance?.websocket?.isActive() || qzInstance.websocket.connection?.readyState !== 1) {
-      // Fallback to browser print
-      setReprintOrder(orderData);
-      setTimeout(() => {
-        window.print();
-        setTimeout(() => setReprintOrder(null), 500);
-      }, 100);
-      return;
-    }
-
-    setIsPrinting(true);
-    try {
-      const config = qzInstance.configs.create(selectedPrinter);
-      const data = [
-        {
-          type: 'raw',
-          format: 'command',
-          flavor: 'plain',
-          data: generateReceiptText(orderData, isReprint)
-        }
-      ];
-      await qzInstance.print(config, data);
-    } catch (err) {
-      console.error("Print error:", err);
-      alert("Erro ao imprimir. Verifique se o QZ Tray está rodando.");
-    } finally {
-      setIsPrinting(false);
-    }
-  };
-
-  const handlePrint = async () => {
+  const handleFinishOrder = async () => {
     const newOrder: Order = {
       id: Date.now().toString(),
       customerName: customerName || 'Sem Nome',
@@ -376,12 +205,7 @@ export default function App() {
     // Save to Supabase
     await saveOrderToSupabase(newOrder);
 
-    await printWithQZ(newOrder);
     resetOrder();
-  };
-
-  const handleReprint = async (order: Order) => {
-    await printWithQZ(order, true);
   };
 
   const toggleOrderStatus = async (id: string) => {
@@ -401,7 +225,7 @@ export default function App() {
     <div className="min-h-screen bg-emerald-950 text-emerald-50 font-sans flex flex-col md:flex-row overflow-hidden">
       
       {/* LEFT PANEL: CART */}
-      <div className="w-full md:w-80 lg:w-96 bg-emerald-900 border-r border-emerald-800 flex flex-col h-screen no-print">
+      <div className="w-full md:w-80 lg:w-96 bg-emerald-900 border-r border-emerald-800 flex flex-col h-screen">
         <div className="p-4 border-b border-emerald-800">
           <h1 className="text-xl font-bold mb-3 flex items-center gap-2 text-emerald-100">
             <ShoppingCart className="w-5 h-5" />
@@ -456,7 +280,7 @@ export default function App() {
       </div>
 
       {/* RIGHT PANEL: ACTIONS */}
-      <div className="flex-1 flex flex-col h-screen overflow-y-auto no-print">
+      <div className="flex-1 flex flex-col h-screen overflow-y-auto">
         <div className="p-4 flex justify-between items-center border-b border-emerald-900/50">
           {view !== 'HOME' ? (
             <button 
@@ -476,13 +300,6 @@ export default function App() {
             >
               <ClipboardList className="w-4 h-4" /> 
               <span className="hidden sm:inline">Pedidos ({orders.filter(o => o.status === 'PENDENTE').length})</span>
-            </button>
-            <button 
-              onClick={() => setView('SETTINGS')}
-              className={`flex items-center gap-2 font-medium px-3 py-1.5 rounded-md transition-colors ${view === 'SETTINGS' ? 'bg-emerald-800 text-white' : 'text-emerald-400 hover:text-emerald-200 hover:bg-emerald-800/50'}`}
-            >
-              <Settings className="w-4 h-4" /> 
-              <span className="hidden sm:inline">Impressora</span>
             </button>
             <button 
               onClick={resetOrder}
@@ -743,12 +560,11 @@ export default function App() {
                 </div>
 
                 <button
-                  onClick={handlePrint}
-                  disabled={isPrinting}
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 disabled:bg-emerald-800 disabled:text-emerald-600 text-emerald-950 font-bold text-xl py-4 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
+                  onClick={handleFinishOrder}
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-bold text-xl py-4 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
                 >
-                  <Printer className="w-6 h-6" />
-                  {isPrinting ? 'Imprimindo...' : 'Imprimir Pedido'}
+                  <CheckCircle2 className="w-6 h-6" />
+                  Finalizar Pedido
                 </button>
               </div>
             </div>
@@ -784,32 +600,57 @@ export default function App() {
                           : 'border-amber-500 shadow-md'
                       }`}
                     >
-                      <div className="flex-1">
-                        <div className="flex items-center gap-3 mb-1">
-                          <span className="font-bold text-lg text-white">#{order.id.slice(-4)}</span>
-                          <span className="text-emerald-200 font-medium text-lg">{order.customerName}</span>
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
-                            order.status === 'PENDENTE' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400'
-                          }`}>
-                            {order.status}
-                          </span>
+                      <div className="flex-1 flex flex-col sm:flex-row gap-4 w-full">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-3 mb-1">
+                            <span className="font-bold text-lg text-white">#{order.id.slice(-4)}</span>
+                            <span className="text-emerald-200 font-medium text-lg">{order.customerName}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                              order.status === 'PENDENTE' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400'
+                            }`}>
+                              {order.status}
+                            </span>
+                          </div>
+                          <div className="text-xs text-emerald-400 mb-2">
+                            {new Date(order.createdAt).toLocaleTimeString()} • {(order.items || []).reduce((acc, i) => acc + i.quantity, 0)} itens • {formatPrice(order.total)}
+                          </div>
+                          
+                          {(order.items || []).filter(item => item.type === 'marmita').length > 0 && (
+                            <div className="mt-3 space-y-2 w-full">
+                              {(order.items || []).filter(item => item.type === 'marmita').map((item, idx) => (
+                                <div 
+                                  key={`marmita-${idx}`} 
+                                  className="p-3 rounded-lg bg-emerald-500/20 border-2 border-emerald-400 shadow-sm"
+                                >
+                                  <div className="font-bold text-emerald-200 text-lg">
+                                    {item.quantity}x {item.name}
+                                  </div>
+                                  {item.description && (
+                                    <div className="mt-1 text-white font-bold text-base bg-emerald-900/50 p-2 rounded-md inline-block">
+                                      {item.description}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                        <div className="text-xs text-emerald-400 mb-2">
-                          {new Date(order.createdAt).toLocaleTimeString()} • {(order.items || []).reduce((acc, i) => acc + i.quantity, 0)} itens • {formatPrice(order.total)}
-                        </div>
-                        <div className="text-sm text-emerald-100/80 leading-tight">
-                          {(order.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ')}
-                        </div>
+
+                        {(order.items || []).filter(item => item.type !== 'marmita').length > 0 && (
+                          <div className="sm:w-1/3 flex flex-col justify-center border-t sm:border-t-0 sm:border-l border-emerald-800/50 pt-3 sm:pt-0 sm:pl-4">
+                            <div className="text-xs font-bold text-emerald-500 uppercase tracking-wider mb-2">Outros Itens</div>
+                            <ul className="space-y-1.5">
+                              {(order.items || []).filter(item => item.type !== 'marmita').map((i, idx) => (
+                                <li key={idx} className="text-sm text-emerald-100/90 flex items-start gap-2 leading-tight">
+                                  <span className="font-bold text-emerald-300">{i.quantity}x</span> {i.name}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                       </div>
                       
-                      <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-                        <button
-                          onClick={() => handleReprint(order)}
-                          disabled={isPrinting}
-                          className="px-4 py-3 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-emerald-200"
-                        >
-                          <Printer className="w-5 h-5" /> Reimprimir
-                        </button>
+                      <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto mt-4 sm:mt-0">
                         <button
                           onClick={() => toggleOrderStatus(order.id)}
                           className={`px-4 py-3 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 ${
@@ -836,110 +677,6 @@ export default function App() {
             </div>
           )}
 
-          {/* SETTINGS VIEW */}
-          {view === 'SETTINGS' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 max-w-xl mx-auto">
-              <div className="bg-emerald-900 rounded-2xl p-6 border border-emerald-800 shadow-xl">
-                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
-                  <Settings className="w-6 h-6 text-emerald-400" />
-                  Configuração de Impressão Direta
-                </h2>
-                
-                <div className="space-y-6">
-                  <div className="bg-emerald-950/50 p-4 rounded-xl border border-emerald-800/50">
-                    <div className="flex items-center justify-between mb-2">
-                      <h3 className="font-bold text-emerald-100">Status do QZ Tray</h3>
-                      <div className={`px-3 py-1 rounded-full text-xs font-bold ${qzConnected ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
-                        {qzConnected ? 'Conectado' : 'Desconectado'}
-                      </div>
-                    </div>
-                    <p className="text-sm text-emerald-300/80 leading-relaxed">
-                      Para impressão direta (como o iFood), você precisa ter o <strong>QZ Tray</strong> instalado e rodando no seu computador.
-                      {!qzConnected && (
-                        <a href="https://qz.io/download/" target="_blank" rel="noreferrer" className="block mt-2 text-emerald-400 hover:text-emerald-300 underline">
-                          Baixar QZ Tray
-                        </a>
-                      )}
-                    </p>
-                  </div>
-
-                  {qzConnected && (
-                    <div className="space-y-3">
-                      <label className="block text-sm font-medium text-emerald-300">Selecione a Impressora Térmica (58mm)</label>
-                      <select 
-                        value={selectedPrinter}
-                        onChange={(e) => setSelectedPrinter(e.target.value)}
-                        className="w-full bg-emerald-950 border border-emerald-700 rounded-lg p-3 text-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      >
-                        <option value="">Selecione uma impressora...</option>
-                        {printers.map(p => (
-                          <option key={p} value={p}>{p}</option>
-                        ))}
-                      </select>
-                      <p className="text-xs text-emerald-400/80">
-                        O sistema enviará os comandos de impressão diretamente para esta impressora, sem abrir telas de confirmação.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-        </div>
-      </div>
-
-      {/* PRINT SECTION (Hidden on screen, visible on print) */}
-      <div id="print-section" className="print-only">
-        <div style={{ textAlign: 'center', marginBottom: '6px', fontSize: '12px', fontWeight: 'bold' }}>
-          ATELIÊ FIT EVENTOS
-        </div>
-        <div style={{ borderBottom: '1px dashed black', paddingBottom: '4px', marginBottom: '4px', fontSize: '9px' }}>
-          Data: {reprintOrder ? new Date(reprintOrder.createdAt).toLocaleDateString() : new Date().toLocaleDateString()} {reprintOrder ? new Date(reprintOrder.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
-          {reprintOrder && <div style={{ fontWeight: 'bold', marginTop: '2px' }}>* REIMPRESSÃO *</div>}
-        </div>
-        
-        {(reprintOrder ? reprintOrder.customerName : customerName) && (
-          <div style={{ borderBottom: '1px dashed black', paddingBottom: '4px', marginBottom: '4px', fontWeight: 'bold', fontSize: '10px' }}>
-            Cliente: {reprintOrder ? reprintOrder.customerName : customerName}
-          </div>
-        )}
-
-        <div style={{ marginBottom: '6px' }}>
-          {(reprintOrder ? (reprintOrder.items || []) : cart).map(item => (
-            <div key={item.id} style={{ marginBottom: '4px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '10px' }}>
-                <span style={{ flex: 1, paddingRight: '4px' }}>{item.quantity}x {item.name}</span>
-                <span>{formatPrice(item.price * item.quantity)}</span>
-              </div>
-              {item.description && (
-                <div style={{ fontSize: '8px', paddingLeft: '8px', marginTop: '1px' }}>
-                  {item.description}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <div style={{ borderTop: '1px dashed black', paddingTop: '4px', marginTop: '4px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px' }}>
-            <span>Subtotal</span>
-            <span>{formatPrice(reprintOrder ? reprintOrder.subtotal : subtotal)}</span>
-          </div>
-          {(reprintOrder ? reprintOrder.discountPercent : discountPercent) > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px' }}>
-              <span>Desconto ({(reprintOrder ? reprintOrder.discountPercent : discountPercent)}%)</span>
-              <span>- {formatPrice(reprintOrder ? reprintOrder.discountAmount : discountAmount)}</span>
-            </div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '11px', marginTop: '2px' }}>
-            <span>TOTAL</span>
-            <span>{formatPrice(reprintOrder ? reprintOrder.total : total)}</span>
-          </div>
-        </div>
-        
-        <div style={{ textAlign: 'center', marginTop: '12px', fontSize: '8px' }}>
-          Obrigado pela preferência!
         </div>
       </div>
     </div>
